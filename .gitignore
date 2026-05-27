@@ -1,0 +1,5 @@
+# Private keys
+*.pem
+
+# Claude settings
+.claude/

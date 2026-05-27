@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate Icons</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    .icon-preview { display: inline-block; margin: 10px; text-align: center; }
+    canvas { border: 1px solid #ccc; }
+    button { margin: 10px; padding: 10px 20px; }
+    .instructions { background: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Multi-Session Manager Icon Generator</h1>
+
+  <div class="instructions">
+    <h3>Instructions:</h3>
+    <ol>
+      <li>Click the "Generate Icons" button below</li>
+      <li>Right-click on each canvas and "Save image as..." with the correct filename</li>
+      <li>Save as: icon16.png, icon48.png, icon128.png in the icons/ folder</li>
+    </ol>
+  </div>
+
+  <button onclick="generateIcons()">Generate Icons</button>
+
+  <div class="icon-preview">
+    <h4>16x16</h4>
+    <canvas id="icon16" width="16" height="16"></canvas>
+  </div>
+
+  <div class="icon-preview">
+    <h4>48x48</h4>
+    <canvas id="icon48" width="48" height="48"></canvas>
+  </div>
+
+  <div class="icon-preview">
+    <h4>128x128</h4>
+    <canvas id="icon128" width="128" height="128"></canvas>
+  </div>
+
+  <script>
+    function drawIcon(canvas, size) {
+      const ctx = canvas.getContext('2d');
+
+      // Background
+      ctx.fillStyle = '#2196F3';
+      const radius = size * 0.125;
+      ctx.beginPath();
+      ctx.roundRect(0, 0, size, size, radius);
+      ctx.fill();
+
+      // Circle 1
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(size * 0.33, size * 0.5, size * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Circle 2
+      ctx.beginPath();
+      ctx.arc(size * 0.67, size * 0.5, size * 0.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Connection line
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = size * 0.05;
+      ctx.beginPath();
+      ctx.moveTo(size * 0.42, size * 0.5);
+      ctx.lineTo(size * 0.58, size * 0.5);
+      ctx.stroke();
+
+      // Text for larger icon
+      if (size >= 48) {
+        ctx.fillStyle = 'white';
+        ctx.font = `bold ${size * 0.15}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillText('MS', size * 0.5, size * 0.85);
+      }
+    }
+
+    function generateIcons() {
+      drawIcon(document.getElementById('icon16'), 16);
+      drawIcon(document.getElementById('icon48'), 48);
+      drawIcon(document.getElementById('icon128'), 128);
+
+      // Auto download
+      downloadIcon('icon16', 16);
+      downloadIcon('icon48', 48);
+      downloadIcon('icon128', 128);
+    }
+
+    function downloadIcon(canvasId, size) {
+      const canvas = document.getElementById(canvasId);
+      const link = document.createElement('a');
+      link.download = `icon${size}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+
+    // Generate on load
+    window.onload = generateIcons;
+  </script>
+</body>
+</html>

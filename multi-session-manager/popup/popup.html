@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Session Manager</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <span class="logo-icon">📦</span>
+        <span class="logo-text">Session Manager</span>
+      </div>
+      <button id="newGroupBtn" class="btn-small primary">+ New</button>
+    </div>
+
+    <!-- Settings -->
+    <div class="settings-section">
+      <label class="toggle-row">
+        <input type="checkbox" id="autoSwitchToggle" checked>
+        <span>Auto-switch cookies</span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="autoSaveToggle" checked>
+        <span>Auto-save (invisible)</span>
+      </label>
+    </div>
+
+    <!-- Groups List -->
+    <div class="groups-section">
+      <div class="section-header">Sessions</div>
+      <div class="groups-list" id="groupsList"></div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-bar">
+      <span id="statsText">Loading...</span>
+    </div>
+  </div>
+
+  <!-- Create Modal -->
+  <div class="modal" id="createModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Session</h3>
+        <button class="modal-close" id="createModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="createName">Name</label>
+          <input type="text" id="createName" placeholder="e.g., Work Account">
+        </div>
+        <div class="form-group">
+          <label forcreateUrl">Start URL (optional)</label>
+          <input type="text" id="createUrl" placeholder="https://">
+        </div>
+        <div class="form-group">
+          <label>Color</label>
+          <div class="color-picker" id="createColor">
+            <button class="color-option selected" data-color="blue" style="background:#2196F3"></button>
+            <button class="color-option" data-color="red" style="background:#F44336"></button>
+            <button class="color-option" data-color="green" style="background:#4CAF50"></button>
+            <button class="color-option" data-color="purple" style="background:#9C27B0"></button>
+            <button class="color-option" data-color="orange" style="background:#FF9800"></button>
+            <button class="color-option" data-color="grey" style="background:#9E9E9E"></button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="createCancel">Cancel</button>
+        <button class="btn-primary" id="createConfirm">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename Modal -->
+  <div class="modal" id="renameModal">
+    <div class="modal-content small">
+      <div class="modal-header">
+        <h3>Rename Session</h3>
+        <button class="modal-close" id="renameModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Current: <span id="renameOldName"></span></label>
+        </div>
+        <div class="form-group">
+          <label for="renameNewName">New Name</label>
+          <input type="text" id="renameNewName">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="renameCancel">Cancel</button>
+        <button class="btn-primary" id="renameConfirm">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
