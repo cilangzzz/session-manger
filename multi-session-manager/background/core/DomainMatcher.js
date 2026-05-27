@@ -44,6 +44,12 @@ export class DomainMatcher {
    */
   getRootDomain(domain) {
     const normalized = this.normalize(domain);
+
+    // 检查是否是 IP 地址（IPv4 或 IPv6）
+    if (this.isIPAddress(normalized)) {
+      return normalized;  // IP 地址本身就是根域名
+    }
+
     const parts = normalized.split('.');
 
     if (parts.length <= 2) {
@@ -64,6 +70,33 @@ export class DomainMatcher {
 
     // 未知顶级域名，保守处理
     return parts.slice(-2).join('.');
+  }
+
+  /**
+   * 检查是否是 IP 地址
+   */
+  isIPAddress(domain) {
+    // IPv4 检查：4 个数字段，每个 0-255
+    const ipv4Pattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (ipv4Pattern.test(domain)) {
+      const parts = domain.split('.');
+      return parts.every(part => {
+        const num = parseInt(part, 10);
+        return num >= 0 && num <= 255;
+      });
+    }
+
+    // IPv6 检查：包含冒号
+    if (domain.includes(':')) {
+      return true;
+    }
+
+    // localhost
+    if (domain === 'localhost') {
+      return true;
+    }
+
+    return false;
   }
 
   /**

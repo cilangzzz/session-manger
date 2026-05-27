@@ -353,6 +353,7 @@ export class GroupStorageManager {
 
               // 立即保存，传入 tab.url 作为 startUrl
               await this.saveToNamedStore(closedName, domain, cookies, webStorage, tab.url, true);
+              console.log(`[GroupStorageManager] Saved storage for "${closedName}" - cookies: ${cookies.length}, ls: ${Object.keys(webStorage.localStorage || {}).length}, ss: ${Object.keys(webStorage.sessionStorage || {}).length}`);
             } catch (e) {}
           }
         }
@@ -387,8 +388,11 @@ export class GroupStorageManager {
     const name = options.name || `Session ${this.managedGroups.size + 1}`;
     const color = options.color || 'blue';
 
+    console.log(`[GroupStorageManager] createGroup START for "${name}"`);
+
     // 设置创建标志，防止 handleTabActivated 干扰
     this.isCreatingGroup = true;
+    console.log(`[GroupStorageManager] Set isCreatingGroup=true for "${name}"`);
 
     try {
       // 检查名称是否已存在（已打开的 Group）
@@ -443,9 +447,8 @@ export class GroupStorageManager {
       console.log(`[GroupStorageManager] Added tab ${tab.id} to group ${groupId}`);
       await chrome.tabGroups.update(groupId, { title: name, color });
 
-      // 添加到管理
+      // 添加到管理（但先不更新 activeGroupName，防止自动保存时保存错误）
       this.managedGroups.set(name, groupId);
-      this.activeGroupName = name;
       this.activeTabId = tab.id;
 
       await this.saveToStorageImmediate();
@@ -454,13 +457,22 @@ export class GroupStorageManager {
       console.log(`[GroupStorageManager] Checking storage for "${name}": has=${this.storageByName.has(name)}`);
       if (this.storageByName.has(name)) {
         const existingStore = this.storageByName.get(name);
-        console.log(`[GroupStorageManager] Found existing store for "${name}" with startUrl="${existingStore.startUrl}"`);
+        console.log(`[GroupStorageManager] Found existing store for "${name}":`, JSON.stringify({
+          startUrl: existingStore.startUrl,
+          domains: existingStore.domains,
+          cookieDomains: Object.keys(existingStore.cookies || {}),
+          cookieCount: Object.values(existingStore.cookies || {}).reduce((sum, arr) => sum + arr.length, 0),
+          lsDomains: Object.keys(existingStore.localStorage || {}),
+          ssDomains: Object.keys(existingStore.sessionStorage || {})
+        }));
         // 有历史存储，等待页面加载后应用
         await this.waitForTabLoad(tab.id, 8000);
         // 重新获取 tab，因为页面可能已经导航
         const currentTab = await chrome.tabs.get(tab.id);
         console.log(`[GroupStorageManager] Applying stored data for "${name}" to tab ${tab.id}, url: ${currentTab?.url}`);
         await this.applyNamedStorage(name, currentTab);
+        // 应用存储后才更新 activeGroupName
+        this.activeGroupName = name;
       } else {
         // 新 Session，初始化存储并保存 startUrl
         await this.waitForTabLoad(tab.id, 5000);
@@ -480,6 +492,8 @@ export class GroupStorageManager {
 
         // 清空当前存储
         await this.clearAllStorage(tab.id, url);
+        // 更新 activeGroupName
+        this.activeGroupName = name;
       }
 
       console.log(`[GroupStorageManager] Created group "${name}" (ID: ${groupId})`);
@@ -650,6 +664,12 @@ export class GroupStorageManager {
    * 自动保存 Tab 存储
    */
   async autoSaveTabStorage(tabId, tab) {
+    // 正在创建 Group 时跳过自动保存
+    if (this.isCreatingGroup) {
+      console.log(`[GroupStorageManager] Skipping auto-save during group creation`);
+      return;
+    }
+
     if (!this.activeGroupName) return;
 
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
@@ -677,7 +697,10 @@ export class GroupStorageManager {
       } catch (e) {}
 
       // 只要有数据就保存，传入 tab.url 作为 startUrl
+      const lsKeys = Object.keys(webStorage.localStorage || {}).length;
+      const ssKeys = Object.keys(webStorage.sessionStorage || {}).length;
       await this.saveToNamedStore(this.activeGroupName, domain, cookies, webStorage, tab.url, false);
+      console.log(`[GroupStorageManager] Auto-saved "${this.activeGroupName}" - domain: ${domain}, cookies: ${cookies.length}, ls: ${lsKeys}, ss: ${ssKeys}`);
     } catch (e) {}
   }
 
@@ -685,6 +708,8 @@ export class GroupStorageManager {
    * Cookie 变化处理
    */
   async handleCookieChanged(changeInfo) {
+    // 正在创建 Group 时跳过
+    if (this.isCreatingGroup) return;
     if (this.ignoreCookieChange || !this.activeGroupName) return;
 
     const { cookie, removed } = changeInfo;
@@ -874,9 +899,13 @@ export class GroupStorageManager {
    * 应用 Cookies - 只应用存储的 Cookie（清空已在 applyNamedStorage 中完成）
    */
   async applyCookies(store, targetDomain) {
+    console.log(`[GroupStorageManager] applyCookies - store.cookies:`, JSON.stringify(store.cookies));
+    console.log(`[GroupStorageManager] applyCookies - targetDomain: ${targetDomain}`);
+
     let appliedCount = 0;
 
     for (const [domain, cookies] of Object.entries(store.cookies)) {
+      console.log(`[GroupStorageManager] Processing domain "${domain}" with ${cookies?.length || 0} cookies`);
       for (const cookie of cookies) {
         try {
           const cookieUrl = this.buildCookieUrl(cookie);
@@ -892,7 +921,9 @@ export class GroupStorageManager {
             expirationDate: cookie.expirationDate
           });
           appliedCount++;
-        } catch (e) {}
+        } catch (e) {
+          console.log(`[GroupStorageManager] Failed to set cookie ${cookie.name}: ${e.message}`);
+        }
       }
     }
 
@@ -904,10 +935,38 @@ export class GroupStorageManager {
    */
   async applyWebStorage(store, tabId, targetDomain) {
     const rootDomain = this.domainMatcher.getRootDomain(targetDomain);
-    const ls = store.localStorage[rootDomain] || {};
-    const ss = store.sessionStorage[rootDomain] || {};
+    console.log(`[GroupStorageManager] applyWebStorage - targetDomain: ${targetDomain}, rootDomain: ${rootDomain}`);
 
-    if (Object.keys(ls).length === 0 && Object.keys(ss).length === 0) return;
+    // 尝试获取存储数据，支持多种 key 格式
+    let ls = store.localStorage[rootDomain] || {};
+    let ss = store.sessionStorage[rootDomain] || {};
+
+    // 如果找不到，尝试用旧格式的 key（兼容之前保存的数据）
+    // 之前 IP 地址可能被错误地转换为段，如 127.0.0.1 -> 0.1
+    if (Object.keys(ls).length === 0 && Object.keys(ss).length === 0) {
+      // 尝试查找可能的旧 key
+      for (const [key, value] of Object.entries(store.localStorage)) {
+        if (this.isMatchingDomainKey(key, targetDomain)) {
+          ls = value;
+          console.log(`[GroupStorageManager] Found localStorage with legacy key "${key}"`);
+          break;
+        }
+      }
+      for (const [key, value] of Object.entries(store.sessionStorage)) {
+        if (this.isMatchingDomainKey(key, targetDomain)) {
+          ss = value;
+          console.log(`[GroupStorageManager] Found sessionStorage with legacy key "${key}"`);
+          break;
+        }
+      }
+    }
+
+    console.log(`[GroupStorageManager] applyWebStorage - ls keys: ${Object.keys(ls).length}, ss keys: ${Object.keys(ss).length}`);
+
+    if (Object.keys(ls).length === 0 && Object.keys(ss).length === 0) {
+      console.log(`[GroupStorageManager] No web storage data to apply for ${rootDomain}`);
+      return;
+    }
 
     try {
       await chrome.scripting.executeScript({
@@ -921,10 +980,36 @@ export class GroupStorageManager {
           for (const [key, value] of Object.entries(sessionStorageData)) {
             sessionStorage.setItem(key, value);
           }
+          console.log(`Applied ${Object.keys(localStorageData).length} localStorage items and ${Object.keys(sessionStorageData).length} sessionStorage items`);
         },
         args: [ls, ss]
       });
-    } catch (e) {}
+      console.log(`[GroupStorageManager] Successfully applied web storage`);
+    } catch (e) {
+      console.error(`[GroupStorageManager] Failed to apply web storage:`, e);
+    }
+  }
+
+  /**
+   * 检查存储的 key 是否匹配目标域名（兼容旧数据）
+   */
+  isMatchingDomainKey(key, targetDomain) {
+    // 直接匹配
+    if (key === targetDomain) return true;
+
+    // 检查是否是 IP 地址的段匹配（旧 bug 的兼容）
+    const parts = targetDomain.split('.');
+    if (parts.length >= 2) {
+      // 尝试最后两段匹配（如 127.0.0.1 -> 0.1）
+      const lastTwo = parts.slice(-2).join('.');
+      if (key === lastTwo) return true;
+
+      // 尝试最后一段匹配
+      const lastOne = parts[parts.length - 1];
+      if (key === lastOne) return true;
+    }
+
+    return false;
   }
 
   /**
