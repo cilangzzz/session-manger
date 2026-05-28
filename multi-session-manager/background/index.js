@@ -53,6 +53,7 @@ function handleRequest(request, sendResponse) {
 
     // 存储
     'getAllStores': () => manager.getAllStores(),
+    'importSession': (data) => manager.importSession(data.data),
     'manualSave': () => manager.manualSave(),
 
     // 设置

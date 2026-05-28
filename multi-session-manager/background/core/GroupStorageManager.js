@@ -662,6 +662,32 @@ export class GroupStorageManager {
   }
 
   /**
+   * 获取 Tab 所属的 Group 名称
+   * @returns {string|null} Group 名称，如果不在任何管理的 Group 中则返回 null
+   */
+  async getTabGroupName(tabId) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab) return null;
+
+      // 遍历管理的 Group，找到 Tab 属于哪个
+      for (const [name, groupId] of this.managedGroups) {
+        try {
+          const tabs = await chrome.tabs.query({ groupId });
+          if (tabs.some(t => t.id === tabId)) {
+            return name;
+          }
+        } catch (e) {
+          // Group 可能不存在
+        }
+      }
+    } catch (e) {
+      // Tab 可能不存在
+    }
+    return null;
+  }
+
+  /**
    * 自动保存 Tab 存储
    */
   async autoSaveTabStorage(tabId, tab) {
@@ -678,6 +704,20 @@ export class GroupStorageManager {
     }
 
     if (!this.activeGroupName) return;
+
+    // 容错检查：验证 Tab 是否真的属于当前 activeGroupName
+    const actualGroupName = await this.getTabGroupName(tabId);
+    if (actualGroupName && actualGroupName !== this.activeGroupName) {
+      console.log(`[GroupStorageManager] Tab ${tabId} is in group "${actualGroupName}", not "${this.activeGroupName}". Updating activeGroupName.`);
+      // 更新 activeGroupName 为实际的 Group 名
+      this.activeGroupName = actualGroupName;
+    }
+
+    // 如果 Tab 不在任何管理的 Group 中，跳过保存
+    if (!actualGroupName) {
+      console.log(`[GroupStorageManager] Tab ${tabId} is not in any managed group, skipping save`);
+      return;
+    }
 
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
       return;
@@ -718,6 +758,18 @@ export class GroupStorageManager {
     // 正在创建 Group 时跳过
     if (this.isCreatingGroup) return;
     if (this.ignoreCookieChange || !this.activeGroupName) return;
+
+    // 容错检查：验证当前 Tab 是否属于 activeGroupName
+    if (this.activeTabId) {
+      const actualGroupName = await this.getTabGroupName(this.activeTabId);
+      if (actualGroupName && actualGroupName !== this.activeGroupName) {
+        console.log(`[GroupStorageManager] Cookie change: Tab is in "${actualGroupName}", not "${this.activeGroupName}"`);
+        this.activeGroupName = actualGroupName;
+      }
+      if (!actualGroupName) {
+        return; // Tab 不在任何管理的 Group 中
+      }
+    }
 
     const { cookie, removed } = changeInfo;
 
