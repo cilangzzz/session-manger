@@ -43,6 +43,7 @@ managedGroups: Map<name, groupId>
 activeGroupName: string      // 当前激活的 Group 名称
 activeTabId: number          // 当前激活的 Tab ID
 isCreatingGroup: boolean     // 创建 Group 时的锁标志
+isApplyingStorage: boolean   // 应用存储时的锁标志（新增）
 ignoreCookieChange: boolean  // 忽略 Cookie 变化标志
 ```
 
@@ -113,7 +114,34 @@ async handleTabActivated(tabId) {
 }
 ```
 
-### 3. 创建新 Group
+### 3. Tab 更新处理 - 导航检测
+
+```
+onUpdated(changeInfo.status === 'complete')
+  ├── 自动保存（autoSaveTabStorage）
+  └── 检查并应用域名存储（checkAndApplyDomainStorage）
+      └── 导航到新域名时，应用该域名的存储
+```
+
+**关键代码**:
+
+```javascript
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete') {
+    // 自动保存
+    if (this.settings.autoSaveEnabled) {
+      await this.autoSaveTabStorage(tabId, tab);
+    }
+
+    // 导航到新域名时，检查并应用该域名的存储
+    if (this.activeGroupName && tab.url && !tab.url.startsWith('chrome://')) {
+      await this.checkAndApplyDomainStorage(tabId, tab);
+    }
+  }
+});
+```
+
+### 4. 创建新 Group
 
 ```
 createGroup(options)
@@ -142,7 +170,162 @@ if (!url && this.storageByName.has(name)) {
 }
 ```
 
-### 4. Group 关闭处理 - 保存后移除
+### 5. 自动保存机制（增强版）
+
+```
+autoSaveTabStorage(tabId, tab)
+  ├── 检查 isCreatingGroup（创建时跳过）
+  ├── 检查 isApplyingStorage（应用存储时跳过）
+  ├── 容错检查：验证 Tab 是否真的属于 activeGroupName
+  │   └── 调用 getTabGroupName(tabId) 验证
+  │   └── 如果不匹配，更新 activeGroupName 为实际的 Group 名
+  ├── 检查 Tab 是否在管理的 Group 中
+  │   └── 如果不在，跳过保存
+  ├── 获取当前域名的所有 Cookies
+  ├── 获取 localStorage 和 sessionStorage
+  └── saveToNamedStore(): 保存到存储（传入 tab.url 作为 startUrl）
+```
+
+**容错检查机制**:
+
+```javascript
+async autoSaveTabStorage(tabId, tab) {
+  // 正在创建 Group 时跳过自动保存
+  if (this.isCreatingGroup) return;
+
+  // 正在应用存储时跳过（刷新后可能会触发）
+  if (this.isApplyingStorage) return;
+
+  // 容错检查：验证 Tab 是否真的属于当前 activeGroupName
+  const actualGroupName = await this.getTabGroupName(tabId);
+  if (actualGroupName && actualGroupName !== this.activeGroupName) {
+    // 更新 activeGroupName 为实际的 Group 名
+    this.activeGroupName = actualGroupName;
+  }
+
+  // 如果 Tab 不在任何管理的 Group 中，跳过保存
+  if (!actualGroupName) return;
+
+  // ... 保存逻辑
+}
+```
+
+### 6. Cookie 变化处理（增强版）
+
+```
+handleCookieChanged(changeInfo)
+  ├── 检查 isCreatingGroup（创建时跳过）
+  ├── 检查 ignoreCookieChange 标志
+  ├── 检查有激活的 Group
+  ├── 容错检查：验证当前 Tab 是否属于 activeGroupName
+  │   └── 调用 getTabGroupName(activeTabId) 验证
+  │   └── 如果不匹配，更新 activeGroupName
+  │   └── 如果 Tab 不在任何管理的 Group 中，跳过
+  ├── 验证 Cookie 属于当前 Tab 的域名
+  └── saveCookieToNamedStore(): 更新存储中的 Cookie
+```
+
+### 7. 应用存储 - 切换会话核心（增强版）
+
+```
+applyNamedStorage(groupName, tab)
+  ├── 获取存储数据
+  ├── 设置 isApplyingStorage = true（防止刷新后自动保存）
+  ├── clearAllStorage(): 清空当前所有存储
+  │   ├── 清空 Cookies
+  │   ├── 清空 localStorage
+  │   └── 清空 sessionStorage
+  ├── applyCookies(): 应用存储的 Cookies
+  ├── applyWebStorage(): 应用 localStorage/sessionStorage
+  │   ├── 支持旧数据 key 格式兼容
+  │   └── 使用 isMatchingDomainKey() 匹配
+  ├── 刷新页面
+  └── 重置 isApplyingStorage = false
+```
+
+**isApplyingStorage 保护机制**:
+
+```javascript
+async applyNamedStorage(groupName, tab) {
+  this.ignoreCookieChange = true;
+  this.isApplyingStorage = true;  // 防止刷新后自动保存
+
+  try {
+    await this.clearAllStorage(tab.id, tab.url);
+    await this.applyCookies(store, targetDomain);
+    await this.applyWebStorage(store, tab.id, targetDomain);
+    await chrome.tabs.reload(tab.id);
+  } finally {
+    this.ignoreCookieChange = false;
+    this.isApplyingStorage = false;
+  }
+}
+```
+
+### 8. 获取 Tab 所属的 Group 名称（新增）
+
+```javascript
+async getTabGroupName(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab) return null;
+
+    // 遍历管理的 Group，找到 Tab 属于哪个
+    for (const [name, groupId] of this.managedGroups) {
+      const tabs = await chrome.tabs.query({ groupId });
+      if (tabs.some(t => t.id === tabId)) {
+        return name;
+      }
+    }
+  } catch (e) {
+    // Tab 可能不存在
+  }
+  return null;
+}
+```
+
+### 9. 导入 Session（新增）
+
+```javascript
+async importSession(sessionData) {
+  if (!sessionData || !sessionData.name) {
+    throw new Error('Invalid session data: missing name');
+  }
+
+  const name = sessionData.name;
+
+  if (this.storageByName.has(name)) {
+    // 已存在，合并数据
+    const existingStore = this.storageByName.get(name);
+
+    // 合并 cookies
+    if (sessionData.cookies) {
+      for (const [domain, cookies] of Object.entries(sessionData.cookies)) {
+        existingStore.cookies[domain] = cookies;
+      }
+    }
+
+    // 合并 localStorage/sessionStorage/domains...
+  } else {
+    // 不存在，创建新存储
+    this.storageByName.set(name, {
+      name: name,
+      startUrl: sessionData.startUrl || null,
+      cookies: sessionData.cookies || {},
+      localStorage: sessionData.localStorage || {},
+      sessionStorage: sessionData.sessionStorage || {},
+      domains: sessionData.domains || [],
+      createdAt: sessionData.createdAt || Date.now(),
+      updatedAt: Date.now()
+    });
+  }
+
+  await this.saveToStorageImmediate();
+  return { success: true, name };
+}
+```
+
+### 10. Group 关闭处理 - 保存后移除
 
 ```
 handleGroupRemoved(group)
@@ -156,168 +339,15 @@ handleGroupRemoved(group)
   └── 清理激活状态
 ```
 
-**关键代码**:
-
-```javascript
-async handleGroupRemoved(group) {
-  // 关闭前，保存当前 Group 的所有 Tab 存储
-  for (const tab of tabs) {
-    if (tab.url && !tab.url.startsWith('chrome://')) {
-      // 立即保存，传入 tab.url 作为 startUrl
-      await this.saveToNamedStore(closedName, domain, cookies, webStorage, tab.url, true);
-    }
-  }
-  // 更新 startUrl 到存储
-  if (lastValidUrl && this.storageByName.has(closedName)) {
-    const store = this.storageByName.get(closedName);
-    store.startUrl = lastValidUrl;
-  }
-}
-```
-
-### 5. 应用存储 - 切换会话核心
-
-```
-applyNamedStorage(groupName, tab)
-  ├── 获取存储数据
-  ├── clearAllStorage(): 清空当前所有存储
-  │   ├── 清空 Cookies
-  │   ├── 清空 localStorage
-  │   └── 清空 sessionStorage
-  ├── applyCookies(): 应用存储的 Cookies
-  ├── applyWebStorage(): 应用 localStorage/sessionStorage
-  │   ├── 支持旧数据 key 格式兼容
-  │   └── 使用 isMatchingDomainKey() 匹配
-  └── 刷新页面
-```
-
-**旧数据兼容机制**:
-
-```javascript
-async applyWebStorage(store, tabId, targetDomain) {
-  const rootDomain = this.domainMatcher.getRootDomain(targetDomain);
-  let ls = store.localStorage[rootDomain] || {};
-  let ss = store.sessionStorage[rootDomain] || {};
-
-  // 如果找不到，尝试用旧格式的 key（兼容之前保存的数据）
-  if (Object.keys(ls).length === 0 && Object.keys(ss).length === 0) {
-    for (const [key, value] of Object.entries(store.localStorage)) {
-      if (this.isMatchingDomainKey(key, targetDomain)) {
-        ls = value;
-        break;
-      }
-    }
-  }
-  // ... 应用 WebStorage
-}
-
-// 检查存储的 key 是否匹配目标域名（兼容旧数据）
-isMatchingDomainKey(key, targetDomain) {
-  if (key === targetDomain) return true;
-  // IP 地址的段匹配（旧 bug 的兼容）
-  const parts = targetDomain.split('.');
-  if (parts.length >= 2) {
-    if (key === parts.slice(-2).join('.')) return true;
-  }
-  return false;
-}
-```
-
-### 6. 自动保存机制
-
-```
-autoSaveTabStorage(tabId, tab)
-  ├── 检查 isCreatingGroup（创建时跳过）
-  ├── 检查是否有激活的 Group
-  ├── 检查 URL 是否有效
-  ├── 获取当前域名的所有 Cookies
-  ├── 获取 localStorage 和 sessionStorage
-  └── saveToNamedStore(): 保存到存储（传入 tab.url 作为 startUrl）
-```
-
-**WebStorage 获取**:
-
-```javascript
-const response = await chrome.scripting.executeScript({
-  target: { tabId },
-  func: () => ({
-    localStorage: { ...localStorage },
-    sessionStorage: { ...sessionStorage }
-  })
-});
-```
-
-### 7. 保存到指定名称存储
-
-```javascript
-async saveToNamedStore(groupName, domain, cookies, webStorage, startUrl = null, immediate = false) {
-  // 初始化存储（如果不存在）
-  if (!this.storageByName.has(groupName)) {
-    this.storageByName.set(groupName, {
-      name: groupName,
-      startUrl: startUrl || `https://${domain}`,
-      cookies: {},
-      localStorage: {},
-      sessionStorage: {},
-      domains: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    });
-  }
-
-  const store = this.storageByName.get(groupName);
-
-  // 更新 startUrl（如果提供了）
-  if (startUrl) {
-    store.startUrl = startUrl;
-  }
-
-  // 保存数据...
-  store.updatedAt = Date.now();
-
-  // 根据参数选择立即保存或防抖保存
-  if (immediate) {
-    await this.saveToStorageImmediate();
-  } else {
-    this.saveToStorage();
-  }
-}
-```
-
-### 8. Cookie 变化监听
-
-```
-handleCookieChanged(changeInfo)
-  ├── 检查 isCreatingGroup（创建时跳过）
-  ├── 检查 ignoreCookieChange 标志
-  ├── 验证有激活的 Group
-  ├── 验证 Cookie 属于当前 Tab 的域名
-  └── saveCookieToNamedStore(): 更新存储中的 Cookie
-```
-
-### 9. Group 重命名处理
-
-```
-handleGroupUpdated(group)
-  ├── 检查是否是管理的 Group
-  ├── 名称变化时:
-  │   ├── 更新 Group 标题
-  │   ├── 迁移存储数据
-  │   ├── 更新 managedGroups 映射
-  │   ├── 更新 activeGroupName
-  │   └── 立即保存到存储
-  └── 打印日志
-```
-
 ## 事件监听器
 
 | 事件 | 触发时机 | 处理逻辑 |
 |------|----------|----------|
 | `chrome.tabs.onActivated` | Tab 激活 | 切换存储（检查 isCreatingGroup） |
-| `chrome.tabs.onUpdated` | Tab 加载完成 | 自动保存 |
+| `chrome.tabs.onUpdated` | Tab 加载完成 | 自动保存 + 导航检测 |
 | `chrome.tabGroups.onUpdated` | Group 更新 | 名称同步迁移 |
 | `chrome.tabGroups.onRemoved` | Group 删除 | 保存存储后移除管理 |
-| `chrome.cookies.onChanged` | Cookie 变化 | 自动保存（检查 isCreatingGroup） |
+| `chrome.cookies.onChanged` | Cookie 变化 | 自动保存（检查 isCreatingGroup/isApplyingStorage） |
 | `chrome.windows.onFocusChanged` | 窗口切换 | Tab 激活处理 |
 
 ## 存储 API
@@ -334,6 +364,8 @@ handleGroupUpdated(group)
 | `getAllStores()` | 获取所有存储 | `Store[]` |
 | `getManagedGroupsList()` | 获取管理列表 | `GroupInfo[]`（含 startUrl） |
 | `manualSave()` | 手动保存 | `{ success, cookieCount, lsCount, ssCount }` |
+| `importSession(sessionData)` | 导入 Session（新增） | `{ success, name }` |
+| `getTabGroupName(tabId)` | 获取 Tab 所属 Group（新增） | `string \| null` |
 
 ### 查询方法
 
@@ -368,14 +400,30 @@ getStats() {
 
 ```javascript
 async createGroup(options) {
-  // 设置创建标志
   this.isCreatingGroup = true;
 
   try {
     // ... 创建逻辑
   } finally {
-    // 重置标志
     this.isCreatingGroup = false;
+  }
+}
+```
+
+### isApplyingStorage（新增）
+
+用于防止应用存储后页面刷新触发自动保存：
+
+```javascript
+async applyNamedStorage(groupName, tab) {
+  this.isApplyingStorage = true;
+
+  try {
+    await this.clearAllStorage(tab.id, tab.url);
+    // ... 应用存储
+    await chrome.tabs.reload(tab.id);
+  } finally {
+    this.isApplyingStorage = false;
   }
 }
 ```
@@ -388,10 +436,7 @@ async createGroup(options) {
 async applyNamedStorage(groupName, tab) {
   this.ignoreCookieChange = true;
   try {
-    await this.clearAllStorage(tab.id, tab.url);
-    await this.applyCookies(store, targetDomain);
-    await this.applyWebStorage(store, tab.id, targetDomain);
-    await chrome.tabs.reload(tab.id);
+    // ... 应用存储
   } finally {
     this.ignoreCookieChange = false;
   }
@@ -441,7 +486,20 @@ settings = {
 ```javascript
 console.log(`[GroupStorageManager] createGroup START for "${name}"`);
 console.log(`[GroupStorageManager] Set isCreatingGroup=true for "${name}"`);
-console.log(`[GroupStorageManager] Created tab ${tab.id} for "${name}"`);
-console.log(`[GroupStorageManager] Applying stored data for "${name}"`);
-console.log(`[GroupStorageManager] Saved storage before closing "${closedName}"`);
+console.log(`[GroupStorageManager] Tab ${tabId} is in group "${actualGroupName}", not "${this.activeGroupName}"`);
+console.log(`[GroupStorageManager] Imported session "${name}"`);
 ```
+
+## 更新历史
+
+| 版本 | 变更 |
+|------|------|
+| 1.0 | 初始版本，基础存储管理 |
+| 1.1 | 新增 startUrl 记忆机制 |
+| 1.1 | 新增 isCreatingGroup 保护机制 |
+| 1.2 | 新增 isApplyingStorage 保护机制 |
+| 1.2 | 新增 getTabGroupName() 容错检查 |
+| 1.2 | 新增 importSession() 导入功能 |
+| 1.2 | 增强 autoSaveTabStorage() 容错逻辑 |
+| 1.2 | 增强 handleCookieChanged() 容错逻辑 |
+| 1.2 | 新增导航检测，自动应用域名存储 |

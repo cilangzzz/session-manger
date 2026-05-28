@@ -36,13 +36,19 @@
 │  │  - Tab Group 级别存储隔离                                     │    │
 │  │  - Cookies + localStorage + sessionStorage 管理             │    │
 │  │  - startUrl 记忆与恢复                                        │    │
-│  │  - 创建/打开/关闭/删除/重命名 Group                           │    │
+│  │  - 创建/打开/关闭/删除/重命名/导入 Group                      │    │
 │  │  - 自动切换与自动保存                                         │    │
+│  │  - 导航检测，自动应用域名存储                                  │    │
 │  │                                                              │    │
 │  │  状态控制：                                                   │    │
 │  │  - isCreatingGroup: 创建锁                                   │    │
+│  │  - isApplyingStorage: 应用存储锁（新增）                      │    │
 │  │  - ignoreCookieChange: Cookie 变化忽略                       │    │
 │  │  - saveDebounceTimer: 防抖保存                               │    │
+│  │                                                              │    │
+│  │  容错机制：                                                   │    │
+│  │  - getTabGroupName(): 验证 Tab 所属 Group                    │    │
+│  │  - 自动修正 activeGroupName                                   │    │
 │  └────────────────────────────────────────────────────────────┘    │
 │                                                                      │
 │  ┌────────────────────┐    ┌────────────────────┐                  │
@@ -66,7 +72,7 @@
 │  DomainMatcher          │  utils.js                                │
 │  - 域名匹配工具           │  - 通用工具函数                          │
 │  - 根域名提取             │  - Cookie 工具                          │
-│  - IP 地址检测（新增）     │  - 存储容量检查                         │
+│  - IP 地址检测            │  - 存储容量检查                         │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,7 +82,7 @@
 
 | 序号 | 模块 | 文档 | 功能描述 |
 |------|------|------|----------|
-| 01 | GroupStorageManager | [01-GroupStorageManager.md](01-GroupStorageManager.md) | **主管理器**：Tab Group 级别存储隔离，整合 Cookies + localStorage + sessionStorage，支持 startUrl 记忆 |
+| 01 | GroupStorageManager | [01-GroupStorageManager.md](01-GroupStorageManager.md) | **主管理器**：Tab Group 级别存储隔离，整合 Cookies + localStorage + sessionStorage，支持 startUrl 记忆、导入 Session、容错检查 |
 | 05 | SessionManager | [05-SessionManager.md](05-SessionManager.md) | 早期版本的 Session 管理器，功能已被 GroupStorageManager 整合 |
 
 ### 子功能模块
@@ -91,7 +97,7 @@
 
 | 序号 | 模块 | 文档 | 功能描述 |
 |------|------|------|----------|
-| 02 | DomainMatcher | [02-DomainMatcher.md](02-DomainMatcher.md) | 域名匹配、规范化、根域名提取、**IP 地址检测**（新增） |
+| 02 | DomainMatcher | [02-DomainMatcher.md](02-DomainMatcher.md) | 域名匹配、规范化、根域名提取、IP 地址检测 |
 
 ### 用户界面
 
@@ -148,68 +154,93 @@ GroupStorageManager.handleTabActivated()
     │   │
     │   ├── 保存上一个 Group 的存储
     │   │   └── autoSaveTabStorage()
-    │   │       ├── 获取 Cookies
-    │   │       ├── 获取 WebStorage
-    │   │       └── saveToNamedStore()（含 startUrl）
+    │   │       ├── 检查 isCreatingGroup / isApplyingStorage
+    │   │       ├── 容错检查：getTabGroupName()
+    │   │       ├── 获取 Cookies / WebStorage
+    │   │       └── saveToNamedStore()
     │   │
     │   ├── 更新激活状态
-    │   │   └── activeTabId = tabId
-    │   │   └── activeGroupName = newGroupName
     │   │
     │   └── 应用新 Group 的存储
     │       └── applyNamedStorage()
-    │           ├── clearAllStorage() - 清空浏览器存储
-    │           ├── applyCookies() - 应用存储的 Cookies
-    │           ├── applyWebStorage() - 应用 WebStorage（含旧数据兼容）
-    │           └── 刷新页面
+    │           ├── 设置 isApplyingStorage = true
+    │           ├── clearAllStorage()
+    │           ├── applyCookies()
+    │           ├── applyWebStorage()
+    │           ├── 刷新页面
+    │           └── 重置 isApplyingStorage = false
     │
     └── 如果 Group 未变化：仅更新 activeTabId
 ```
 
-### Session 创建流程（含 isCreatingGroup 保护）
+### Tab 更新处理（导航检测）
+
+```
+Tab 加载完成（status === 'complete'）
+    │
+    ├── 自动保存（autoSaveEnabled）
+    │   └── autoSaveTabStorage()
+    │       ├── 检查 isCreatingGroup / isApplyingStorage
+    │       ├── 容错检查：getTabGroupName()
+    │       ├── 获取存储数据
+    │       └── saveToNamedStore()
+    │
+    └── 导航检测（activeGroupName 存在）
+        └── checkAndApplyDomainStorage()
+            └── 导航到新域名时，应用该域名的存储
+```
+
+### 自动保存容错机制
+
+```
+autoSaveTabStorage(tabId, tab)
+    │
+    ├── 检查 isCreatingGroup → 跳过
+    │
+    ├── 检查 isApplyingStorage → 跳过
+    │
+    ├── 容错检查：验证 Tab 所属 Group
+    │   │
+    │   ├── getTabGroupName(tabId)
+    │   │   └── 遍历 managedGroups 找到 Tab 属于哪个 Group
+    │   │
+    │   ├── actualGroupName !== activeGroupName
+    │   │   └── 更新 activeGroupName = actualGroupName
+    │   │
+    │   └── actualGroupName === null
+    │       └── 跳过保存（Tab 不在任何管理的 Group 中）
+    │
+    └── 执行保存逻辑
+```
+
+### Session 创建流程（含双重保护机制）
 
 ```
 用户点击"新建 Session"
     │
     ▼
-Popup.confirmCreate()
-    │
-    ▼
-sendMessage('createGroup', { name, url, color })
-    │
-    ▼
 GroupStorageManager.createGroup()
     │
-    ├── 设置 isCreatingGroup = true（防止 handleTabActivated 干扰）
+    ├── 设置 isCreatingGroup = true
     │
     ├── 检查名称是否已存在
-    │   └── 已打开：激活现有 Group，应用存储，返回
+    │   └── 已打开：激活现有 Group，返回
     │
-    ├── 确定 URL（优先级：参数 > startUrl > 默认）
+    ├── 确定 URL（参数 > startUrl > 默认）
     │
-    ├── 保存当前 Group 的存储
-    │
-    ├── 创建新 Tab
-    │   └── chrome.tabs.create({ url, active: true })
-    │
-    ├── 创建 Tab Group
-    │   └── chrome.tabs.group({ tabIds: [tab.id] })
-    │
-    ├── 设置 Group 属性
-    │   └── chrome.tabGroups.update({ title: name, color })
+    ├── 创建新 Tab 和 Group
     │
     ├── 处理存储
     │   │
     │   ├── 有历史存储：
-    │   │   ├── 等待页面加载（waitForTabLoad，最多 8 秒）
-    │   │   ├── 重新获取 tab（页面可能已导航）
-    │   │   ├── applyNamedStorage() 应用存储
+    │   │   ├── waitForTabLoad(8000ms)
+    │   │   ├── applyNamedStorage()
+    │   │   │   └── 设置 isApplyingStorage = true
     │   │   └── 更新 activeGroupName
     │   │
     │   └── 新 Session：
-    │   │   ├── 等待页面加载（waitForTabLoad，最多 5 秒）
     │   │   ├── 初始化存储记录（含 startUrl）
-    │   │   ├── clearAllStorage() 清空当前存储
+    │   │   ├── clearAllStorage()
     │   │   └── 更新 activeGroupName
     │
     ├── 重置 isCreatingGroup = false
@@ -217,105 +248,86 @@ GroupStorageManager.createGroup()
     └── 返回 { groupId, name, tabId, isNew: true }
 ```
 
-### Group 关闭流程（保存后移除）
+### Session 导入流程（新增）
 
 ```
-用户关闭 Tab Group 或关闭最后一个 Tab
+importSession(sessionData)
     │
-    ▼
-chrome.tabGroups.onRemoved 触发
+    ├── 验证 sessionData.name
     │
-    ▼
-GroupStorageManager.handleGroupRemoved()
-    │
-    ├── 找到对应的 Group 名称
-    │
-    ├── 遍历 Group 中的所有 Tab
+    ├── 检查是否已存在
     │   │
-    │   ├── 检查 URL 是否有效
+    │   ├── 已存在：合并数据
+    │   │   ├── 合并 cookies（按域名）
+    │   │   ├── 合并 localStorage
+    │   │   ├── 合并 sessionStorage
+    │   │   ├── 合并 domains
+    │   │   └── 更新 startUrl（如果没有）
     │   │
-    │   ├── 获取 Cookies（getAllCookiesForDomain）
-    │   │
-    │   ├── 获取 WebStorage
-    │   │   └── executeScript 获取 localStorage/sessionStorage
-    │   │
-    │   ├── 立即保存到存储
-    │   │   └── saveToNamedStore(name, domain, cookies, webStorage, tab.url, true)
-    │   │       └── immediate=true，立即写入
-    │   │
-    │   └── 记录最后一个有效 URL 作为 startUrl
+    │   └── 不存在：创建新存储
+    │       └── 完整复制 sessionData
     │
-    ├── 更新存储的 startUrl
-    │   └── store.startUrl = lastValidUrl
-    │
-    ├── 从 managedGroups 中移除
-    │
-    ├── 清理激活状态
-    │   └── activeGroupName = null
-    │   └── activeTabId = null
-    │
-    └── 立即保存到 chrome.storage.local
+    └── saveToStorageImmediate()
 ```
 
 ## 新增功能与更新
 
-### startUrl 记忆机制
+### isApplyingStorage 保护机制（新增）
 
-当 Group 关闭时，记录最后访问的 URL。下次打开时自动恢复：
-
-```javascript
-// 存储结构
-{
-  name: 'Session 1',
-  startUrl: 'https://mail.google.com/mail/u/0/#inbox',
-  cookies: { ... },
-  localStorage: { ... },
-  sessionStorage: { ... }
-}
-
-// 创建时恢复
-let url = options.url;
-if (!url && this.storageByName.has(name)) {
-  url = this.storageByName.get(name).startUrl || 'https://www.google.com';
-}
-```
-
-### isCreatingGroup 保护机制
-
-防止创建 Group 时 `handleTabActivated` 重复触发切换：
+防止应用存储后页面刷新触发自动保存：
 
 ```javascript
-async handleTabActivated(tabId) {
-  if (this.isCreatingGroup) {
-    console.log('Ignoring tab activation during group creation');
-    return;
+async applyNamedStorage(groupName, tab) {
+  this.isApplyingStorage = true;
+  try {
+    await this.clearAllStorage(tab.id, tab.url);
+    // ... 应用存储
+    await chrome.tabs.reload(tab.id);
+  } finally {
+    this.isApplyingStorage = false;
   }
-  // ... 正常处理
 }
 ```
 
-### IP 地址处理
+### getTabGroupName 容错检查（新增）
 
-DomainMatcher 新增 `isIPAddress()` 方法，正确处理本地开发环境：
+验证 Tab 真正所属的 Group，防止 activeGroupName 不同步：
 
 ```javascript
-getRootDomain('127.0.0.1') → '127.0.0.1'
-getRootDomain('localhost') → 'localhost'
-getRootDomain('::1') → '::1'
+async getTabGroupName(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  for (const [name, groupId] of this.managedGroups) {
+    const tabs = await chrome.tabs.query({ groupId });
+    if (tabs.some(t => t.id === tabId)) {
+      return name;
+    }
+  }
+  return null;
+}
 ```
 
-### 旧数据兼容
+### 导入 Session 功能（新增）
 
-GroupStorageManager 支持 WebStorage 的旧数据 key 格式：
+支持从外部导入 Session 数据：
 
 ```javascript
-// 尝试查找可能的旧 key（IP 地址可能被错误地转换为段）
-isMatchingDomainKey(key, targetDomain) {
-  if (key === targetDomain) return true;
-  // 如 127.0.0.1 -> 0.1 的兼容
-  const parts = targetDomain.split('.');
-  if (key === parts.slice(-2).join('.')) return true;
-  return false;
+const result = await manager.importSession({
+  name: 'Imported Session',
+  startUrl: 'https://example.com',
+  cookies: { 'example.com': [...] },
+  localStorage: { 'example.com': { key: 'value' } },
+  sessionStorage: {},
+  domains: ['example.com']
+});
+```
+
+### 导航检测（新增）
+
+Tab 导航到新域名时，检查并应用该域名的存储：
+
+```javascript
+if (this.activeGroupName && tab.url) {
+  await this.checkAndApplyDomainStorage(tabId, tab);
 }
 ```
 
@@ -328,37 +340,6 @@ isMatchingDomainKey(key, targetDomain) {
 - **Tab API**: chrome.tabs, chrome.tabGroups
 - **Scripting**: chrome.scripting (WebStorage 操作)
 
-## 开发指南
-
-### 添加新的消息处理
-
-1. 在 `background/index.js` 的 `handleRequest` 函数中添加新的 handler：
-
-```javascript
-const handlers = {
-  // ...
-  'newAction': (data) => manager.newMethod(data),
-};
-```
-
-2. 在 GroupStorageManager 类中实现方法
-
-3. 在 UI 层调用：
-
-```javascript
-const response = await sendMessage('newAction', { param: value });
-```
-
-### 添加新的存储字段
-
-1. 更新数据结构定义
-
-2. 在 `loadFromStorage()` 中添加字段加载
-
-3. 在 `saveToStorage()` 中添加字段保存
-
-4. 更新文档说明
-
 ## 版本历史
 
 | 版本 | 变更 |
@@ -369,4 +350,8 @@ const response = await sendMessage('newAction', { param: value });
 | 1.2.0 | 新增 startUrl 记忆机制 |
 | 1.2.0 | 新增 isCreatingGroup 保护机制 |
 | 1.2.0 | 新增 IP 地址检测（DomainMatcher） |
-| 1.2.0 | 新增旧数据兼容机制 |
+| 1.3.0 | **新增 isApplyingStorage 保护机制** |
+| 1.3.0 | **新增 getTabGroupName() 容错检查** |
+| 1.3.0 | **新增 importSession() 导入功能** |
+| 1.3.0 | **增强自动保存容错逻辑** |
+| 1.3.0 | **新增导航检测，自动应用域名存储** |

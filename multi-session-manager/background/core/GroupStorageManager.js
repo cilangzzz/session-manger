@@ -170,8 +170,16 @@ export class GroupStorageManager {
 
     // Tab 更新
     chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-      if (changeInfo.status === 'complete' && this.settings.autoSaveEnabled) {
-        await this.autoSaveTabStorage(tabId, tab);
+      if (changeInfo.status === 'complete') {
+        // 自动保存
+        if (this.settings.autoSaveEnabled) {
+          await this.autoSaveTabStorage(tabId, tab);
+        }
+
+        // 导航到新域名时，检查并应用该域名的存储
+        if (this.activeGroupName && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+          await this.checkAndApplyDomainStorage(tabId, tab);
+        }
       }
     });
 
@@ -556,20 +564,38 @@ export class GroupStorageManager {
 
   /**
    * 清空 Tab 的所有存储（Cookie + localStorage + sessionStorage）
+   * @param {number} tabId - Tab ID
+   * @param {string} url - 当前页面 URL
+   * @param {string[]|null} domainsToClear - 要清除的域名列表，为 null 时只清除当前 URL 域名
    */
-  async clearAllStorage(tabId, url) {
+  async clearAllStorage(tabId, url, domainsToClear = null) {
     try {
       const urlObj = new URL(url);
-      const domain = urlObj.hostname;
+      const currentDomain = urlObj.hostname;
 
-      // 1. 清空 Cookies
-      const cookies = await this.getAllCookiesForDomain(domain);
-      for (const cookie of cookies) {
+      // 确定要清除的域名列表
+      let domains = domainsToClear;
+      if (!domains || domains.length === 0) {
+        // 如果没有指定，只清除当前域名
+        domains = [currentDomain];
+      }
+
+      // 1. 清空所有相关域名的 Cookies
+      let totalCleared = 0;
+      for (const domain of domains) {
         try {
-          const cookieUrl = this.buildCookieUrl(cookie);
-          await chrome.cookies.remove({ url: cookieUrl, name: cookie.name });
+          const cookies = await this.getAllCookiesForDomain(domain);
+          for (const cookie of cookies) {
+            try {
+              const cookieUrl = this.buildCookieUrl(cookie);
+              await chrome.cookies.remove({ url: cookieUrl, name: cookie.name });
+              totalCleared++;
+            } catch (e) {}
+          }
         } catch (e) {}
       }
+
+      console.log(`[GroupStorageManager] Cleared ${totalCleared} cookies for domains: ${domains.join(', ')}`);
 
       // 2. 清空 localStorage 和 sessionStorage
       try {
@@ -585,9 +611,10 @@ export class GroupStorageManager {
         // 可能是 chrome:// 页面
       }
 
-      console.log(`[GroupStorageManager] Cleared all storage for ${domain}`);
+      console.log(`[GroupStorageManager] Cleared all storage for domains: ${domains.join(', ')}`);
     } catch (e) {
       // 忽略无效 URL
+      console.log(`[GroupStorageManager] clearAllStorage error: ${e.message}`);
     }
   }
 
@@ -685,6 +712,77 @@ export class GroupStorageManager {
       // Tab 可能不存在
     }
     return null;
+  }
+
+  /**
+   * 检查并应用域名存储
+   * 当 Tab 导航到新域名时，检查该 Group 是否有该域名的存储，如果有则应用
+   * 同时清除浏览器中可能存在的其他 Group 的 cookies
+   */
+  async checkAndApplyDomainStorage(tabId, tab) {
+    if (!this.activeGroupName) return;
+
+    const store = this.storageByName.get(this.activeGroupName);
+    if (!store) return;
+
+    try {
+      const url = new URL(tab.url);
+      const currentDomain = url.hostname;
+      const rootDomain = this.domainMatcher.getRootDomain(currentDomain);
+
+      // 检查当前 Group 是否有该域名的存储
+      const hasStoredData = store.cookies[rootDomain] ||
+        store.localStorage[rootDomain] ||
+        store.sessionStorage[rootDomain];
+
+      if (hasStoredData) {
+        // 有存储数据，需要应用
+        console.log(`[GroupStorageManager] checkAndApplyDomainStorage: Found stored data for ${rootDomain} in "${this.activeGroupName}"`);
+
+        // 先清除浏览器中该域名的 cookies（可能是其他 Group 留下的）
+        const browserCookies = await this.getAllCookiesForDomain(currentDomain);
+        if (browserCookies.length > 0) {
+          this.ignoreCookieChange = true;
+          try {
+            for (const cookie of browserCookies) {
+              try {
+                const cookieUrl = this.buildCookieUrl(cookie);
+                await chrome.cookies.remove({ url: cookieUrl, name: cookie.name });
+              } catch (e) {}
+            }
+          } finally {
+            this.ignoreCookieChange = false;
+          }
+        }
+
+        // 应用存储的 cookies
+        if (store.cookies[rootDomain]) {
+          this.ignoreCookieChange = true;
+          try {
+            for (const cookie of store.cookies[rootDomain]) {
+              try {
+                const cookieUrl = this.buildCookieUrl(cookie);
+                await chrome.cookies.set({
+                  url: cookieUrl,
+                  name: cookie.name,
+                  value: cookie.value,
+                  domain: cookie.domain,
+                  path: cookie.path || '/',
+                  secure: cookie.secure || false,
+                  httpOnly: cookie.httpOnly || false,
+                  sameSite: cookie.sameSite || 'lax',
+                  expirationDate: cookie.expirationDate
+                });
+              } catch (e) {}
+            }
+          } finally {
+            this.ignoreCookieChange = false;
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[GroupStorageManager] checkAndApplyDomainStorage error: ${e.message}`);
+    }
   }
 
   /**
@@ -933,16 +1031,19 @@ export class GroupStorageManager {
     this.isApplyingStorage = true;  // 防止刷新后自动保存
 
     try {
-      // 1. 先清空当前所有存储
-      await this.clearAllStorage(tab.id, tab.url);
+      // 1. 获取该 Group 存储中所有域名（用于清除浏览器中的旧 cookies）
+      const storeDomains = store.domains || Object.keys(store.cookies) || [];
 
-      // 2. 应用存储的 Cookie
+      // 2. 清空浏览器中所有相关域名的存储（确保只保留当前 Group 的数据）
+      await this.clearAllStorage(tab.id, tab.url, storeDomains);
+
+      // 3. 应用存储的 Cookie
       await this.applyCookies(store, targetDomain);
 
-      // 3. 应用存储的 WebStorage
+      // 4. 应用存储的 WebStorage
       await this.applyWebStorage(store, tab.id, targetDomain);
 
-      // 4. 刷新页面
+      // 5. 刷新页面
       await chrome.tabs.reload(tab.id);
 
       console.log(`[GroupStorageManager] Applied storage for "${groupName}"`);
