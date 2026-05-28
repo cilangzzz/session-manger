@@ -36,6 +36,7 @@ export class GroupStorageManager {
 
     this.ignoreCookieChange = false;
     this.isCreatingGroup = false;  // 防止创建时重复触发切换
+    this.isApplyingStorage = false;  // 防止应用存储时触发自动保存
     this.saveDebounceTimer = null;
     this.initialized = false;
   }
@@ -670,6 +671,12 @@ export class GroupStorageManager {
       return;
     }
 
+    // 正在应用存储时跳过（刷新后可能会触发）
+    if (this.isApplyingStorage) {
+      console.log(`[GroupStorageManager] Skipping auto-save during storage application`);
+      return;
+    }
+
     if (!this.activeGroupName) return;
 
     if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
@@ -871,6 +878,7 @@ export class GroupStorageManager {
     }
 
     this.ignoreCookieChange = true;
+    this.isApplyingStorage = true;  // 防止刷新后自动保存
 
     try {
       // 1. 先清空当前所有存储
@@ -892,6 +900,7 @@ export class GroupStorageManager {
       return { success: false, error: e.message };
     } finally {
       this.ignoreCookieChange = false;
+      this.isApplyingStorage = false;
     }
   }
 
