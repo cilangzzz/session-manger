@@ -1284,6 +1284,76 @@ export class GroupStorageManager {
   }
 
   /**
+   * 导入 Session
+   */
+  async importSession(sessionData) {
+    if (!sessionData || !sessionData.name) {
+      throw new Error('Invalid session data: missing name');
+    }
+
+    const name = sessionData.name;
+
+    // 检查是否已存在
+    if (this.storageByName.has(name)) {
+      // 已存在，合并数据
+      const existingStore = this.storageByName.get(name);
+
+      // 合并 cookies
+      if (sessionData.cookies) {
+        for (const [domain, cookies] of Object.entries(sessionData.cookies)) {
+          existingStore.cookies[domain] = cookies;
+        }
+      }
+
+      // 合并 localStorage
+      if (sessionData.localStorage) {
+        for (const [domain, ls] of Object.entries(sessionData.localStorage)) {
+          existingStore.localStorage[domain] = ls;
+        }
+      }
+
+      // 合并 sessionStorage
+      if (sessionData.sessionStorage) {
+        for (const [domain, ss] of Object.entries(sessionData.sessionStorage)) {
+          existingStore.sessionStorage[domain] = ss;
+        }
+      }
+
+      // 合并 domains
+      if (sessionData.domains) {
+        for (const domain of sessionData.domains) {
+          if (!existingStore.domains.includes(domain)) {
+            existingStore.domains.push(domain);
+          }
+        }
+      }
+
+      // 更新 startUrl（如果没有的话）
+      if (!existingStore.startUrl && sessionData.startUrl) {
+        existingStore.startUrl = sessionData.startUrl;
+      }
+
+      existingStore.updatedAt = Date.now();
+    } else {
+      // 不存在，创建新存储
+      this.storageByName.set(name, {
+        name: name,
+        startUrl: sessionData.startUrl || null,
+        cookies: sessionData.cookies || {},
+        localStorage: sessionData.localStorage || {},
+        sessionStorage: sessionData.sessionStorage || {},
+        domains: sessionData.domains || [],
+        createdAt: sessionData.createdAt || Date.now(),
+        updatedAt: Date.now()
+      });
+    }
+
+    await this.saveToStorageImmediate();
+    console.log(`[GroupStorageManager] Imported session "${name}"`);
+    return { success: true, name };
+  }
+
+  /**
    * 获取统计
    */
   getStats() {

@@ -66,7 +66,7 @@ async function initialize() {
 async function loadSettings() {
   const response = await sendMessage('getSettings');
   if (response?.success) {
-    settings = response.data;
+    settings = response.data || {};
     elements.autoSwitchToggle.checked = settings.autoSwitchEnabled !== false;
     elements.autoSaveToggle.checked = settings.autoSaveEnabled !== false;
   }
@@ -357,7 +357,7 @@ async function importSessions(file) {
           continue;
         }
 
-        const response = await sendMessage('importSession', { data: session });
+        const response = await sendMessage('importSession', session);
         if (response?.success) {
           imported++;
         } else {
